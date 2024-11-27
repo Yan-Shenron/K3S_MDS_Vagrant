@@ -1,0 +1,65 @@
+require 'dotenv'
+Dotenv.load
+
+Vagrant.configure(2) do |config|
+    config.vm.boot_timeout = 600 # Set the boot timeout globally
+
+    base_ip_str = ENV['BASE_IP_STR']
+    cpu_worker = ENV['CPU_WORKER'].to_i
+    mem_worker = ENV['MEM_WORKER'].to_i
+    number_workers = ENV['NUMBER_WORKERS'].to_i
+    config.vm.box = "ubuntu/focal64" # Image for all installations
+    kubectl_version = ENV['KUBECTL_VERSION']
+    user_name = ENV['USER_NAME']
+    user_password = ENV['USER_PASSWORD']
+    user_public_key = ENV['USER_PUBLIC_KEY']
+    k3s_token = ENV['K3S_TOKEN']
+    k3s_server_url = ENV['K3S_SERVER_URL']
+
+    nodes = []
+    (1..number_workers).each do |i| 
+        nodes[i] = {
+            "name" => "worker#{i}",
+            "ip" => "#{base_ip_str}#{i}"
+        }
+    end
+
+    # Provision VM
+    nodes.each do |node|
+        config.vm.define node["name"] do |machine|
+            machine.vm.hostname = node["name"]
+            machine.vm.provider "virtualbox" do |lv|
+                lv.cpus = cpu_worker
+                lv.memory = mem_worker
+            end
+            machine.vm.synced_folder '.', '/vagrant', disabled: true
+            machine.vm.network "private_network", ip: node["ip"]
+            machine.vm.network "public_network", bridge: "wg0" # Bridged network on WireGuard interface
+            machine.vm.provision "shell", inline: <<-SHELL
+            # Enable password authentication
+            sudo sed -i 's/^#*PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+            sudo sed -i 's/^#*PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+        
+            # Restart SSH service
+            sudo systemctl restart ssh || sudo service ssh restart
+        
+            # Create user with password
+            sudo useradd -m -p $(openssl passwd -1 '#{user_password}') #{user_name}
+            sudo usermod -aG sudo #{user_name}
+        
+            # Set correct permissions on SSH config
+            sudo chmod 644 /etc/ssh/sshd_config
+
+            # Add public key for SSH access
+            sudo mkdir -p /home/#{user_name}/.ssh
+            echo '#{user_public_key}' | sudo tee -a /home/#{user_name}/.ssh/authorized_keys
+            sudo chown -R #{user_name}:#{user_name} /home/#{user_name}/.ssh
+            sudo chmod 600 /home/#{user_name}/.ssh/authorized_keys
+
+            # Install K3S client
+            curl -sfL https://get.k3s.io | K3S_URL=#{k3s_server_url} K3S_TOKEN=#{k3s_token} sh -
+        SHELL
+        
+        end
+    end
+end
